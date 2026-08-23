@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Normalized import ordering with isort.
 - Corrected PEP 8 whitespace, indentation, quoting, and `None` comparison style.
 - Preserved the existing public camelCase APIs to avoid breaking current callers.
+- Git commits for updates are now signed with GPG.
 
 ### Validation
 

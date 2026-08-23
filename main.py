@@ -23,17 +23,23 @@ import re
 import sys
 import traceback
 from hashlib import sha256
+from io import BytesIO
+from ipaddress import ip_address
 from mimetypes import guess_type
 from os import getenv
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+from weakref import WeakValueDictionary
 
 import cloudscraper
-from aiohttp import ClientSession, CookieJar
+from aiohttp import ClientSession, ClientTimeout, CookieJar, TCPConnector
+from aiohttp.abc import AbstractResolver
+from aiohttp.resolver import DefaultResolver
 from feedgen.ext.base import BaseEntryExtension, BaseExtension
 from feedgen.feed import FeedGenerator
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from lxml import etree
+from PIL import Image
 from quart import Quart, Response, render_template, request
 
 import podimo.cache as cache
@@ -42,11 +48,62 @@ from podimo.config import *
 from podimo.utils import generateHeaders, randomHexId
 
 PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
+ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+MAX_ARTWORK_SIZE = 10 * 1024 * 1024
+MAX_ARTWORK_DIMENSION = 3000
+MAX_ARTWORK_PIXELS = 20_000_000
+artwork_downloads = asyncio.Semaphore(2)
+artwork_locks = WeakValueDictionary()
+
+
+async def runInThread(function, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, function, *args)
+
+
+def ensurePublicAddresses(addresses):
+    if any(not ip_address(address["host"]).is_global for address in addresses):
+        raise OSError("Artwork host resolves to a non-public address")
+    return addresses
+
+
+class PublicResolver(AbstractResolver):
+    def __init__(self):
+        self.resolver = DefaultResolver()
+
+    async def resolve(self, host, port=0, family=0):
+        addresses = await self.resolver.resolve(host, port, family)
+        return ensurePublicAddresses(addresses)
+
+    async def close(self):
+        await self.resolver.close()
+
+
+class PublicConnector(TCPConnector):
+    async def _resolve_host(self, host, port, traces=None):
+        addresses = await super()._resolve_host(host, port, traces)
+        return ensurePublicAddresses(addresses)
 
 
 class PodcastHlsExtension(BaseExtension):
+    def __init__(self):
+        self._itunes_type = None
+
+    def itunes_type(self, value=None):
+        if value is not None:
+            self._itunes_type = value
+        return self._itunes_type
+
     def extend_ns(self):
         return {"podcast": PODCAST_NAMESPACE}
+
+    def extend_rss(self, feed):
+        if self._itunes_type is not None:
+            podcast_type = etree.SubElement(
+                feed[0], etree.QName(ITUNES_NAMESPACE, "type")
+            )
+            podcast_type.text = self._itunes_type
+        return feed
 
 
 class PodcastHlsEntryExtension(BaseEntryExtension):
@@ -250,6 +307,99 @@ async def serve_basic_auth_feed(podcast_id):
             return await serve_feed(username, auth.password, podcast_id, region, locale)
 
 
+def artworkUrl(image_url):
+    if not image_url:
+        return None
+
+    parsed_url = urlsplit(image_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        logging.warning("Skipping invalid artwork URL")
+        return None
+
+    if parsed_url.path.lower().endswith((".jpg", ".jpeg", ".png")):
+        return image_url
+
+    key = cache.registerArtworkSource(image_url)
+    return f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/artwork/{key}.jpg"
+
+
+def artworkToJpeg(data):
+    with Image.open(BytesIO(data)) as source:
+        if source.width * source.height > MAX_ARTWORK_PIXELS:
+            raise ValueError("Artwork exceeds maximum pixel count")
+        source.load()
+        source.thumbnail(
+            (MAX_ARTWORK_DIMENSION, MAX_ARTWORK_DIMENSION), Image.Resampling.LANCZOS
+        )
+
+        if source.mode in ("RGBA", "LA") or "transparency" in source.info:
+            rgba = source.convert("RGBA")
+            image = Image.new("RGB", rgba.size, "white")
+            image.paste(rgba, mask=rgba.getchannel("A"))
+        else:
+            image = source.convert("RGB")
+
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=90, optimize=True)
+        return output.getvalue()
+
+
+async def fetchArtwork(image_url):
+    timeout = ClientTimeout(total=20)
+    connector = PublicConnector(resolver=PublicResolver())
+    async with ClientSession(timeout=timeout, connector=connector) as session:
+        async with session.get(
+            image_url, allow_redirects=True, max_redirects=5
+        ) as response:
+            response.raise_for_status()
+            if response.content_length and response.content_length > MAX_ARTWORK_SIZE:
+                raise ValueError("Artwork exceeds maximum download size")
+
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                data.extend(chunk)
+                if len(data) > MAX_ARTWORK_SIZE:
+                    raise ValueError("Artwork exceeds maximum download size")
+            return bytes(data)
+
+
+@app.route("/artwork/<string:key>.jpg")
+async def serve_artwork(key):
+    if not re.fullmatch(r"[0-9a-f]{64}", key):
+        return Response("Artwork not found", 404, {})
+
+    artwork = await runInThread(cache.getArtwork, key)
+    if artwork is None and await runInThread(cache.getArtworkFailure, key):
+        return Response("Something went wrong while fetching artwork", 502, {})
+
+    if artwork is None:
+        lock = artwork_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            artwork = await runInThread(cache.getArtwork, key)
+            if artwork is None:
+                if await runInThread(cache.getArtworkFailure, key):
+                    return Response(
+                        "Something went wrong while fetching artwork", 502, {}
+                    )
+                source_url = await runInThread(cache.getArtworkSource, key)
+                if source_url is None:
+                    return Response("Artwork not found", 404, {})
+
+                try:
+                    async with artwork_downloads:
+                        source = await fetchArtwork(source_url)
+                        artwork = await runInThread(artworkToJpeg, source)
+                    await runInThread(cache.insertArtwork, key, artwork)
+                except Exception as error:
+                    await runInThread(cache.insertArtworkFailure, key)
+                    logging.error(f"Error while fetching artwork {key}: {error}")
+                    return Response(
+                        "Something went wrong while fetching artwork", 502, {}
+                    )
+
+    return Response(artwork, mimetype="image/jpeg")
+
+
 def split_username_region_locale(string):
     s = string.split(",")
     if len(s) == 3:
@@ -355,8 +505,10 @@ async def addFeedEntry(fg, episode, session, locale):
     fe.guid(episode["id"])
     fe.title(episode["title"])
     fe.description(episode["description"])
-    fe.pubDate(episode["publishDatetime"])
-    fe.podcast.itunes_image(episode["imageUrl"])
+    fe.pubDate(episode.get("publishDatetime", episode.get("datetime")))
+    image = artworkUrl(episode.get("imageUrl"))
+    if image:
+        fe.podcast.itunes_image(image)
 
     url, duration = extract_audio_url(episode)
     if url is None:
@@ -450,7 +602,13 @@ async def podcastsToRss(podcast_id, data, locale):
         image = podcast["images"]["coverImageUrl"]
         if image is None:
             image = last_episode["imageUrl"]
-        fg.image(image)
+        image = artworkUrl(image)
+        if image:
+            fg.image(image)
+            fg.podcast.itunes_image(image)
+        fg.podcast.itunes_category("News")
+        fg.podcast.itunes_explicit("no")
+        fg.podcast_hls.itunes_type("episodic")
 
         language = podcast["language"]
         if language is None:

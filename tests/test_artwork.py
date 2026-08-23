@@ -171,7 +171,7 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
             f'/artwork/{"f" * 64}.jpg"',
             feed_text,
         )
-        self.assertIn("<itunes:explicit>no</itunes:explicit>", feed_text)
+        self.assertIn("<itunes:explicit>false</itunes:explicit>", feed_text)
         self.assertIn("<itunes:type>episodic</itunes:type>", feed_text)
         url_head_info.assert_awaited_once()
 

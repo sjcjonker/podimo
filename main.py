@@ -87,7 +87,13 @@ class PublicConnector(TCPConnector):
 
 class PodcastHlsExtension(BaseExtension):
     def __init__(self):
+        self._itunes_explicit = None
         self._itunes_type = None
+
+    def itunes_explicit(self, value=None):
+        if value is not None:
+            self._itunes_explicit = value
+        return self._itunes_explicit
 
     def itunes_type(self, value=None):
         if value is not None:
@@ -98,6 +104,11 @@ class PodcastHlsExtension(BaseExtension):
         return {"podcast": PODCAST_NAMESPACE}
 
     def extend_rss(self, feed):
+        if self._itunes_explicit is not None:
+            explicit = etree.SubElement(
+                feed[0], etree.QName(ITUNES_NAMESPACE, "explicit")
+            )
+            explicit.text = self._itunes_explicit
         if self._itunes_type is not None:
             podcast_type = etree.SubElement(
                 feed[0], etree.QName(ITUNES_NAMESPACE, "type")
@@ -607,7 +618,7 @@ async def podcastsToRss(podcast_id, data, locale):
             fg.image(image)
             fg.podcast.itunes_image(image)
         fg.podcast.itunes_category("News")
-        fg.podcast.itunes_explicit("no")
+        fg.podcast_hls.itunes_explicit("false")
         fg.podcast_hls.itunes_type("episodic")
 
         language = podcast["language"]

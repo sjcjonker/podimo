@@ -18,79 +18,80 @@
 # permissions and limitations under the Licence.
 
 import asyncio
+import logging
 import re
 import sys
-import logging
-from os import getenv
-from podimo.client import PodimoClient
-from feedgen.feed import FeedGenerator
-from feedgen.ext.base import BaseExtension, BaseEntryExtension
-from lxml import etree
-from mimetypes import guess_type
-from aiohttp import ClientSession, CookieJar
-from quart import Quart, Response, render_template, request
+import traceback
 from hashlib import sha256
-from hypercorn.config import Config
-from hypercorn.asyncio import serve
+from mimetypes import guess_type
+from os import getenv
 from urllib.parse import quote
+
+import cloudscraper
+from aiohttp import ClientSession, CookieJar
+from feedgen.ext.base import BaseEntryExtension, BaseExtension
+from feedgen.feed import FeedGenerator
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
+from lxml import etree
+from quart import Quart, Response, render_template, request
+
+import podimo.cache as cache
+from podimo.client import PodimoClient
 from podimo.config import *
 from podimo.utils import generateHeaders, randomHexId
-import podimo.cache as cache
-import cloudscraper
-import traceback
 
 PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
 
+
 class PodcastHlsExtension(BaseExtension):
     def extend_ns(self):
-        return {
-            "podcast": PODCAST_NAMESPACE
-        }
+        return {"podcast": PODCAST_NAMESPACE}
+
 
 class PodcastHlsEntryExtension(BaseEntryExtension):
     def __init__(self):
         self._alternate_enclosures = []
 
     def alternate_enclosure(self, uri, type, length=0, title=None):
-        self._alternate_enclosures.append({
-            "uri": uri,
-            "type": type,
-            "length": length,
-            "title": title,
-        })
+        self._alternate_enclosures.append(
+            {
+                "uri": uri,
+                "type": type,
+                "length": length,
+                "title": title,
+            }
+        )
+
     def extend_rss(self, entry):
         for enclosure in self._alternate_enclosures:
             alternate = etree.SubElement(
                 entry,
-                etree.QName(
-                    PODCAST_NAMESPACE,
-                    "alternateEnclosure"
-                ),
+                etree.QName(PODCAST_NAMESPACE, "alternateEnclosure"),
                 type=enclosure["type"],
-                length=str(enclosure["length"])
+                length=str(enclosure["length"]),
             )
             if enclosure["title"] is not None:
                 alternate.set("title", enclosure["title"])
             etree.SubElement(
                 alternate,
-                etree.QName(
-                    PODCAST_NAMESPACE,
-                    "source"
-                ),
-                uri=enclosure["uri"]
+                etree.QName(PODCAST_NAMESPACE, "source"),
+                uri=enclosure["uri"],
             )
         return entry
+
 
 # Setup Quart, used for serving the web pages
 app = Quart(__name__)
 proxies = dict()
 
-#Setup logging
+# Setup logging
 logging.basicConfig(
     format="%(levelname)s | %(asctime)s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
     level=logging.INFO,
 )
+
 
 def example():
     return f"""Example
@@ -106,13 +107,17 @@ Note that the username and password should be URL encoded. This can be done with
 a tool like https://gchq.github.io/CyberChef/#recipe=URL_Encode(true)
 """
 
+
 @app.after_request
 def allow_cors(response):
-    response.headers.set('Access-Control-Allow-Origin', '*')
-    response.headers.set('Access-Control-Allow-Methods', 'GET, POST')
-    response.headers.set('Cache-Control', 'max-age=900')
-    logging.debug(f"Incoming {request.method} request for '{request.url}' from User-Agent {request.user_agent} at {request.remote_addr}.")
+    response.headers.set("Access-Control-Allow-Origin", "*")
+    response.headers.set("Access-Control-Allow-Methods", "GET, POST")
+    response.headers.set("Cache-Control", "max-age=900")
+    logging.debug(
+        f"Incoming {request.method} request for '{request.url}' from User-Agent {request.user_agent} at {request.remote_addr}."
+    )
     return response
+
 
 def authenticate():
     return Response(
@@ -123,11 +128,14 @@ You need to login with the correct credentials for Podimo.
         401,
         {
             "Content-Type": "text/plain",
-            "WWW-Authenticate": "Basic realm='Podimo credentials'"
+            "WWW-Authenticate": "Basic realm='Podimo credentials'",
         },
     )
 
-def initialize_client(username: str, password: str, region: str, locale: str) -> PodimoClient:
+
+def initialize_client(
+    username: str, password: str, region: str, locale: str
+) -> PodimoClient:
     client = PodimoClient(username, password, region, locale)
 
     # Check if there is an authentication token already in memory. If so, use that one.
@@ -140,6 +148,7 @@ def initialize_client(username: str, password: str, region: str, locale: str) ->
         cache.cookie_jars[key] = CookieJar()
     client.cookie_jar = cache.cookie_jars[key]
     return client
+
 
 async def check_auth(username, password, region, locale, scraper):
     try:
@@ -157,7 +166,9 @@ async def check_auth(username, password, region, locale, scraper):
             traceback.print_exc()
     return None
 
+
 podcast_id_pattern = re.compile(r"[0-9a-fA-F\-]+")
+
 
 @app.route("/", methods=["POST", "GET"])
 async def index():
@@ -192,20 +203,26 @@ async def index():
             podcast_id = quote(str(podcast_id), safe="")
             region = quote(str(region), safe="")
             locale = quote(str(locale), safe="")
-            
+
             if LOCAL_CREDENTIALS:
                 url = f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
             else:
                 email = quote(str(email), safe="")
-                comma = quote(',', safe="")
+                comma = quote(",", safe="")
                 username = f"{email}{comma}{region}{comma}{locale}"
-                password = quote(str(password), safe="")             
+                password = quote(str(password), safe="")
                 url = f"{PODIMO_PROTOCOL}://{username}:{password}@{PODIMO_HOSTNAME}/feed/{podcast_id}.xml?{randomHexId(10)}&region={region}&locale={locale}"
-            
+
             logging.debug(f"Created an URL: {url}.")
             return await render_template("feed_location.html", url=url)
 
-    return await render_template("index.html", error=error, locales=LOCALES, regions=REGIONS, need_credentials=not(LOCAL_CREDENTIALS))
+    return await render_template(
+        "index.html",
+        error=error,
+        locales=LOCALES,
+        regions=REGIONS,
+        need_credentials=not (LOCAL_CREDENTIALS),
+    )
 
 
 @app.errorhandler(404)
@@ -221,7 +238,9 @@ async def serve_basic_auth_feed(podcast_id):
         args = request.args
         region = args.get("region")
         locale = args.get("locale")
-        return await serve_feed(PODIMO_EMAIL, PODIMO_PASSWORD, podcast_id, region, locale)
+        return await serve_feed(
+            PODIMO_EMAIL, PODIMO_PASSWORD, podcast_id, region, locale
+        )
     else:
         auth = request.authorization
         if not auth:
@@ -232,11 +251,11 @@ async def serve_basic_auth_feed(podcast_id):
 
 
 def split_username_region_locale(string):
-    s = string.split(',')
+    s = string.split(",")
     if len(s) == 3:
         return tuple(s)
     else:
-        return (s[0], 'nl', 'nl-NL')
+        return (s[0], "nl", "nl-NL")
 
 
 def token_key(username, password):
@@ -248,23 +267,25 @@ def token_key(username, password):
 
 @app.route("/feed/<string:username>/<string:password>/<string:podcast_id>.xml")
 async def serve_feed(username, password, podcast_id, region, locale):
-    
-    logging.debug(f"Feed request for podcast {podcast_id} from IP {request.remote_addr} with User-Agent:{request.user_agent}.")
-    
+
+    logging.debug(
+        f"Feed request for podcast {podcast_id} from IP {request.remote_addr} with User-Agent:{request.user_agent}."
+    )
+
     # Check if it is a valid podcast id string
     if podcast_id_pattern.fullmatch(podcast_id) is None:
         return Response("Invalid podcast id format", 400, {})
-   
+
     if region not in [region_code for (region_code, _) in REGIONS]:
         return Response("Invalid region", 400, {})
     if locale not in LOCALES:
         return Response("Invalid locale", 400, {})
 
-    # Check if url contains unique ID or podcastID in blocked list. If so, return HTTP code 410 GONE
+    # Return HTTP 410 GONE if the URL contains a blocked ID or podcast ID.
     if any(item in request.url for item in BLOCKED):
         logging.debug(f"Blocked! Podcast {podcast_id} is on local block list")
-        return Response("Podcast is gone", 410, {}) 
-    
+        return Response("Podcast is gone", 410, {})
+
     with cloudscraper.create_scraper() as scraper:
         scraper.proxies = proxies
         client = await check_auth(username, password, region, locale, scraper)
@@ -300,7 +321,7 @@ async def urlHeadInfo(session, id, url, locale):
         content_type, _ = guess_type(url)
         if "content-length" in response.headers:
             content_length = response.headers["content-length"]
-        if content_type == None and "content-type" in response.headers:
+        if content_type is None and "content-type" in response.headers:
             content_type = response.headers["content-type"]
         else:
             content_type = "audio/mpeg"
@@ -311,9 +332,9 @@ async def urlHeadInfo(session, id, url, locale):
 def extract_audio_url(episode):
     duration = 0
     url = None
-    if episode['audio']:
-        url = episode['audio']['url']
-        duration = episode['audio']['duration']
+    if episode["audio"]:
+        url = episode["audio"]["url"]
+        duration = episode["audio"]["duration"]
 
     if url is None or url == "":
         if episode["streamMedia"]:
@@ -324,8 +345,8 @@ def extract_audio_url(episode):
                 url = url.replace("/main.m3u8", ".mp3")
 
     # SJC
-    #url = url.replace('&amp;', '&')
-    #logging.info(f"Media URL: {url}")
+    # url = url.replace('&amp;', '&')
+    # logging.info(f"Media URL: {url}")
     return url, duration
 
 
@@ -343,7 +364,7 @@ async def addFeedEntry(fg, episode, session, locale):
     url, duration = extract_audio_url(episode)
     if url is None:
         logging.warning(f"No audio URL found for episode {episode_id}")
-        return 
+        return
 
     logging.debug(
         f"Audio URL found for episode {episode_id}, duration={duration}, "
@@ -352,13 +373,10 @@ async def addFeedEntry(fg, episode, session, locale):
 
     fe.podcast.itunes_duration(duration)
     content_length, content_type = await urlHeadInfo(
-		session,
-		episode['id'],
-		url,
-		locale
-	)
+        session, episode["id"], url, locale
+    )
 
-	# Podimo returns HLS manifests as .m3u8 URLs.
+    # Podimo returns HLS manifests as .m3u8 URLs.
     is_hls = url.split("?", 1)[0].lower().endswith(".m3u8")
 
     if is_hls:
@@ -368,7 +386,9 @@ async def addFeedEntry(fg, episode, session, locale):
     fe.enclosure(url, content_length, content_type)
 
     if is_hls:
-        logging.debug(f"Adding Podcasting 2.0 alternateEnclosure for episode {episode_id}")
+        logging.debug(
+            f"Adding Podcasting 2.0 alternateEnclosure for episode {episode_id}"
+        )
         fe.podcast_hls.alternate_enclosure(
             uri=url,
             type="application/x-mpegURL",
@@ -378,9 +398,11 @@ async def addFeedEntry(fg, episode, session, locale):
 
         logging.debug(f"Finished feed entry for episode {episode_id}")
 
+
 def chunks(x, n):
     for i in range(0, len(x), n):
-        yield x[i:i + n]
+        yield x[i : i + n]
+
 
 async def podcastsToRss(podcast_id, data, locale):
     logging.debug(f"podcastsToRss: START podcast_id={podcast_id}")
@@ -414,9 +436,7 @@ async def podcastsToRss(podcast_id, data, locale):
         )
 
     except Exception:
-        logging.exception(
-            f"podcastsToRss: FAILED for podcast_id={podcast_id}"
-        )
+        logging.exception(f"podcastsToRss: FAILED for podcast_id={podcast_id}")
         raise
 
     if len(episodes) > 0:
@@ -435,7 +455,7 @@ async def podcastsToRss(podcast_id, data, locale):
 
         image = podcast["images"]["coverImageUrl"]
         if image is None:
-            image = last_episode['imageUrl']
+            image = last_episode["imageUrl"]
         fg.image(image)
 
         language = podcast["language"]
@@ -467,21 +487,26 @@ async def spawn_web_server():
     config.read_timeout = 60
     config.graceful_timeout = 5
     config.backlog = 1000
-    app.config['TEMPLATES_AUTO_RELOAD'] = True
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
     await serve(app, config)
+
 
 async def main():
     if HTTP_PROXY:
         global proxies
-        logging.info(f"Running with https proxy defined in environmental variable HTTP_PROXY: {HTTP_PROXY}")
-        proxies['https'] = HTTP_PROXY
+        logging.info(
+            f"Running with https proxy defined in environmental variable HTTP_PROXY: {HTTP_PROXY}"
+        )
+        proxies["https"] = HTTP_PROXY
     tasks = [spawn_web_server()]
     await asyncio.gather(*tasks)
 
+
 if __name__ == "__main__":
     if DEBUG:
-        logging.info(f"""Spawning server on {PODIMO_BIND_HOST}
-Configuration: 
+        logging.info(
+            f"""Spawning server on {PODIMO_BIND_HOST}
+Configuration:
 - DEBUG: {DEBUG}
 - LOCAL CREDENTIALS: {LOCAL_CREDENTIALS} ({PODIMO_EMAIL})
 - PODIMO_HOSTNAME: {PODIMO_HOSTNAME}
@@ -497,5 +522,6 @@ Configuration:
 - PODCAST_CACHE_TIME: {PODCAST_CACHE_TIME} sec
 - HEAD_CACHE_TIME: {HEAD_CACHE_TIME} sec
 - BLOCKING: {BLOCKED}
-""")
+"""
+        )
     asyncio.run(main())

@@ -619,6 +619,7 @@ async def podcastsToRss(podcast_id, data, locale):
             fg.podcast.itunes_image(image)
         fg.podcast.itunes_category("News")
         fg.podcast_hls.itunes_explicit("false")
+        fg.podcast.itunes_owner(name="Example", email="you@example.com")
         fg.podcast_hls.itunes_type("episodic")
 
         language = podcast["language"]

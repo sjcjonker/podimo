@@ -24,8 +24,10 @@ import logging
 from os import getenv
 from podimo.client import PodimoClient
 from feedgen.feed import FeedGenerator
+from feedgen.ext.base import BaseExtension, BaseEntryExtension
+from lxml import etree
 from mimetypes import guess_type
-from aiohttp import ClientSession, CookieJar, ClientTimeout
+from aiohttp import ClientSession, CookieJar
 from quart import Quart, Response, render_template, request
 from hashlib import sha256
 from hypercorn.config import Config
@@ -36,6 +38,48 @@ from podimo.utils import generateHeaders, randomHexId
 import podimo.cache as cache
 import cloudscraper
 import traceback
+
+PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
+
+class PodcastHlsExtension(BaseExtension):
+    def extend_ns(self):
+        return {
+            "podcast": PODCAST_NAMESPACE
+        }
+
+class PodcastHlsEntryExtension(BaseEntryExtension):
+    def __init__(self):
+        self._alternate_enclosures = []
+
+    def alternate_enclosure(self, uri, type, length=0, title=None):
+        self._alternate_enclosures.append({
+            "uri": uri,
+            "type": type,
+            "length": length,
+            "title": title,
+        })
+    def extend_rss(self, entry):
+        for enclosure in self._alternate_enclosures:
+            alternate = etree.SubElement(
+                entry,
+                etree.QName(
+                    PODCAST_NAMESPACE,
+                    "alternateEnclosure"
+                ),
+                type=enclosure["type"],
+                length=str(enclosure["length"])
+            )
+            if enclosure["title"] is not None:
+                alternate.set("title", enclosure["title"])
+            etree.SubElement(
+                alternate,
+                etree.QName(
+                    PODCAST_NAMESPACE,
+                    "source"
+                ),
+                uri=enclosure["uri"]
+            )
+        return entry
 
 # Setup Quart, used for serving the web pages
 app = Quart(__name__)
@@ -248,34 +292,20 @@ async def urlHeadInfo(session, id, url, locale):
     if entry:
         return entry
 
-    retries = 3  # Number of retries
-    timeout = ClientTimeout(total=10)  # 10 seconds timeout for each try
-
-    for attempt in range(retries):
-        try:
-            logging.debug(f"HEAD request to {url} (Attempt {attempt + 1})")
-            async with session.head(url, allow_redirects=True,
-                                    headers=generateHeaders(None, locale),
-                                    timeout=timeout) as response:
-                content_length = 0
-                content_type, _ = guess_type(url)
-                if 'content-length' in response.headers:
-                    content_length = response.headers['content-length']
-                if content_type is None and 'content-type' in response.headers:
-                    content_type = response.headers['content-type']
-                else:
-                    content_type = 'audio/mpeg'
-                cache.insertIntoHeadCache(id, content_length, content_type)
-                return (content_length, content_type)
-
-        except asyncio.TimeoutError:
-            if attempt < retries - 1:
-                logging.info(f"Retrying HEAD request to {url} (Attempt {attempt + 2})")
-                await asyncio.sleep(1)  # Wait for 1 second before retrying
-            else:
-                logging.error(f"All retries failed for HEAD request to {url}")
-                raise  # Re-raise the last exception if all retries fail
-
+    logging.debug(f"HEAD request to {url}")
+    async with session.head(
+        url, allow_redirects=True, headers=generateHeaders(None, locale), timeout=3.05
+    ) as response:
+        content_length = 0
+        content_type, _ = guess_type(url)
+        if "content-length" in response.headers:
+            content_length = response.headers["content-length"]
+        if content_type == None and "content-type" in response.headers:
+            content_type = response.headers["content-type"]
+        else:
+            content_type = "audio/mpeg"
+        cache.insertIntoHeadCache(id, content_length, content_type)
+        return (content_length, content_type)
 
 
 def extract_audio_url(episode):
@@ -293,35 +323,101 @@ def extract_audio_url(episode):
                 url = url.replace("hls-media", "audios")
                 url = url.replace("/main.m3u8", ".mp3")
 
+    # SJC
+    #url = url.replace('&amp;', '&')
+    #logging.info(f"Media URL: {url}")
     return url, duration
 
 
 async def addFeedEntry(fg, episode, session, locale):
+    episode_id = episode.get("id", "<unknown>")
+    logging.debug(f"Starting feed entry for episode {episode_id}")
+
     fe = fg.add_entry()
     fe.guid(episode["id"])
     fe.title(episode["title"])
     fe.description(episode["description"])
-    fe.pubDate(episode.get("publishDatetime", episode.get("datetime")))
+    fe.pubDate(episode["publishDatetime"])
     fe.podcast.itunes_image(episode["imageUrl"])
 
     url, duration = extract_audio_url(episode)
     if url is None:
+        logging.warning(f"No audio URL found for episode {episode_id}")
         return 
-    logging.debug(f"Found podcast '{episode['title']}'")
+
+    logging.debug(
+        f"Audio URL found for episode {episode_id}, duration={duration}, "
+        f"is_hls={url.split('?', 1)[0].lower().endswith('.m3u8')}"
+    )
+
     fe.podcast.itunes_duration(duration)
-    content_length, content_type = await urlHeadInfo(session, episode['id'], url, locale)
+    content_length, content_type = await urlHeadInfo(
+		session,
+		episode['id'],
+		url,
+		locale
+	)
+
+	# Podimo returns HLS manifests as .m3u8 URLs.
+    is_hls = url.split("?", 1)[0].lower().endswith(".m3u8")
+
+    if is_hls:
+        logging.debug(f"Episode {episode_id} detected as HLS; overriding MIME type")
+        content_type = "application/x-mpegURL"
+
     fe.enclosure(url, content_length, content_type)
+
+    if is_hls:
+        logging.debug(f"Adding Podcasting 2.0 alternateEnclosure for episode {episode_id}")
+        fe.podcast_hls.alternate_enclosure(
+            uri=url,
+            type="application/x-mpegURL",
+            length=content_length,
+            title="HLS",
+        )
+
+        logging.debug(f"Finished feed entry for episode {episode_id}")
 
 def chunks(x, n):
     for i in range(0, len(x), n):
         yield x[i:i + n]
 
 async def podcastsToRss(podcast_id, data, locale):
-    fg = FeedGenerator()
-    fg.load_extension("podcast")
+    logging.debug(f"podcastsToRss: START podcast_id={podcast_id}")
 
-    podcast = data["podcast"]
-    episodes = data["episodes"]
+    try:
+        logging.debug("podcastsToRss: creating FeedGenerator")
+        fg = FeedGenerator()
+        logging.debug("podcastsToRss: FeedGenerator created")
+
+        logging.debug("podcastsToRss: loading podcast extension")
+        fg.load_extension("podcast")
+        logging.debug("podcastsToRss: podcast extension loaded")
+
+        logging.debug("podcastsToRss: registering HLS extension")
+        fg.register_extension(
+            "podcast_hls",
+            extension_class_feed=PodcastHlsExtension,
+            extension_class_entry=PodcastHlsEntryExtension,
+            atom=False,
+            rss=True,
+        )
+        logging.debug("podcastsToRss: HLS extension registered")
+
+        logging.debug("podcastsToRss: reading podcast data")
+        podcast = data["podcast"]
+        episodes = data["episodes"]
+
+        logging.debug(
+            f"podcastsToRss: podcast={podcast.get('title')!r}, "
+            f"episodes={len(episodes)}"
+        )
+
+    except Exception:
+        logging.exception(
+            f"podcastsToRss: FAILED for podcast_id={podcast_id}"
+        )
+        raise
 
     if len(episodes) > 0:
         last_episode = episodes[0]

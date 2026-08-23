@@ -340,9 +340,6 @@ def extract_audio_url(episode):
         if episode["streamMedia"]:
             url = episode["streamMedia"]["url"]
             duration = episode["streamMedia"]["duration"]
-            if "hls-media" in url and "/main.m3u8" in url:
-                url = url.replace("hls-media", "audios")
-                url = url.replace("/main.m3u8", ".mp3")
 
     # SJC
     # url = url.replace('&amp;', '&')
@@ -380,14 +377,9 @@ async def addFeedEntry(fg, episode, session, locale):
     is_hls = url.split("?", 1)[0].lower().endswith(".m3u8")
 
     if is_hls:
-        logging.debug(f"Episode {episode_id} detected as HLS; overriding MIME type")
-        content_type = "application/x-mpegURL"
-
-    fe.enclosure(url, content_length, content_type)
-
-    if is_hls:
         logging.debug(
-            f"Adding Podcasting 2.0 alternateEnclosure for episode {episode_id}"
+            f"Adding HLS alternateEnclosure without a standard enclosure "
+            f"for episode {episode_id}"
         )
         fe.podcast_hls.alternate_enclosure(
             uri=url,
@@ -395,8 +387,10 @@ async def addFeedEntry(fg, episode, session, locale):
             length=content_length,
             title="HLS",
         )
+    else:
+        fe.enclosure(url, content_length, content_type)
 
-        logging.debug(f"Finished feed entry for episode {episode_id}")
+    logging.debug(f"Finished feed entry for episode {episode_id}")
 
 
 def chunks(x, n):

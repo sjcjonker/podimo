@@ -182,7 +182,7 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         new_callable=AsyncMock,
         return_value=("123", "application/octet-stream"),
     )
-    async def test_hls_uses_only_alternate_enclosure(self, url_head_info):
+    async def test_hls_uses_standard_and_alternate_enclosures(self, url_head_info):
         data = {
             "podcast": {
                 "title": "Test podcast",
@@ -213,7 +213,13 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         feed_xml = etree.fromstring(feed)
         item = feed_xml.find("./channel/item")
 
-        self.assertIsNone(item.find("enclosure"))
+        enclosure = item.find("enclosure")
+        self.assertIsNotNone(enclosure)
+        self.assertEqual(
+            enclosure.get("url"),
+            "https://cdn.example.com/main.mp3?token=abc",
+        )
+        self.assertEqual(enclosure.get("type"), "audio/mpeg")
         alternate = item.find(f"{{{main.PODCAST_NAMESPACE}}}alternateEnclosure")
         self.assertIsNotNone(alternate)
         self.assertEqual(alternate.get("type"), "application/x-mpegURL")

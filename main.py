@@ -540,10 +540,12 @@ async def addFeedEntry(fg, episode, session, locale):
     is_hls = url.split("?", 1)[0].lower().endswith(".m3u8")
 
     if is_hls:
+        enclosure_url = url.replace(".m3u8", ".mp3")
         logging.debug(
-            f"Adding HLS alternateEnclosure without a standard enclosure "
+            f"Adding MP3 enclosure {enclosure_url} and HLS alternate enclosure "
             f"for episode {episode_id}"
         )
+        fe.enclosure(enclosure_url, content_length, "audio/mpeg")
         fe.podcast_hls.alternate_enclosure(
             uri=url,
             type="application/x-mpegURL",

@@ -102,6 +102,20 @@ class ArtworkRouteTests(unittest.IsolatedAsyncioTestCase):
         insert_artwork.assert_called_once_with("e" * 64, result)
 
 
+class AudioRouteTests(unittest.IsolatedAsyncioTestCase):
+    @patch("main.send_from_directory", new_callable=AsyncMock)
+    async def test_audio_file_is_served_from_audio_directory(self, send_file):
+        send_file.return_value = main.Response(b"mp3-data", mimetype="audio/mpeg")
+        client = main.app.test_client()
+
+        response = await client.get("/audio/dummy.mp3")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "audio/mpeg")
+        self.assertEqual(await response.get_data(), b"mp3-data")
+        send_file.assert_awaited_once_with(main.AUDIO_DIR, "dummy.mp3")
+
+
 class PublicResolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_connector_rejects_literal_private_address(self):
         connector = main.PublicConnector(resolver=main.PublicResolver())

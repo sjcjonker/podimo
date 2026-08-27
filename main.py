@@ -27,6 +27,7 @@ from io import BytesIO
 from ipaddress import ip_address
 from mimetypes import guess_type
 from os import getenv
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 from weakref import WeakValueDictionary
 
@@ -40,7 +41,7 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from lxml import etree
 from PIL import Image
-from quart import Quart, Response, render_template, request
+from quart import Quart, Response, render_template, request, send_from_directory
 
 import podimo.cache as cache
 from podimo.client import PodimoClient
@@ -50,6 +51,7 @@ from podimo.utils import generateHeaders, randomHexId
 PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
 ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 HLS_FALLBACK_MP3_URL = "https://sjc.nl/pc/audio/dummy.mp3"
+AUDIO_DIR = Path(__file__).resolve().parent / "audio"
 MAX_ARTWORK_SIZE = 10 * 1024 * 1024
 MAX_ARTWORK_DIMENSION = 3000
 MAX_ARTWORK_PIXELS = 20_000_000
@@ -299,6 +301,11 @@ async def not_found(error):
     return Response(
         f"404 Not found.\n\n{example()}", 404, {"Content-Type": "text/plain"}
     )
+
+
+@app.route("/audio/<string:filename>")
+async def serve_audio(filename):
+    return await send_from_directory(AUDIO_DIR, filename)
 
 
 @app.route("/feed/<string:podcast_id>.xml")

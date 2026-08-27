@@ -55,6 +55,13 @@ docker run --rm \
 
 3. Visit http://localhost:12104. You should see the site now!
 
+## HLS fallback audio
+
+Podcast clients without HLS support receive `/audio/dummy.mp3` as their standard
+RSS enclosure. Place the fallback MP3 at `audio/dummy.mp3`. The app serves this
+directory at `/audio/`; a reverse proxy may expose it under a prefix such as
+`/pc/audio/`.
+
 ## Configuration
 A complete list of all configuration options can be found in the [.env.example file](.env.example)
 

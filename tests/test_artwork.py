@@ -217,8 +217,9 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(enclosure)
         self.assertEqual(
             enclosure.get("url"),
-            "https://cdn.example.com/main.mp3?token=abc",
+            main.HLS_FALLBACK_MP3_URL,
         )
+        self.assertEqual(enclosure.get("length"), "0")
         self.assertEqual(enclosure.get("type"), "audio/mpeg")
         alternate = item.find(f"{{{main.PODCAST_NAMESPACE}}}alternateEnclosure")
         self.assertIsNotNone(alternate)

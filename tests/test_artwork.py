@@ -116,6 +116,22 @@ class AudioRouteTests(unittest.IsolatedAsyncioTestCase):
         send_file.assert_awaited_once_with(main.AUDIO_DIR, "dummy.mp3")
 
 
+class HlsFallbackTests(unittest.TestCase):
+    @patch("main.HLS_FALLBACK_MP3_PATH")
+    def test_size_is_read_from_file(self, fallback_path):
+        fallback_path.is_file.return_value = True
+        fallback_path.stat.return_value.st_size = 187288
+
+        self.assertEqual(main.hlsFallbackMp3Size(), "187288")
+
+    @patch("main.HLS_FALLBACK_MP3_PATH")
+    def test_missing_file_raises_clear_error(self, fallback_path):
+        fallback_path.is_file.return_value = False
+
+        with self.assertRaisesRegex(FileNotFoundError, "fallback MP3 not found"):
+            main.hlsFallbackMp3Size()
+
+
 class PublicResolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_connector_rejects_literal_private_address(self):
         connector = main.PublicConnector(resolver=main.PublicResolver())
@@ -196,7 +212,10 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         new_callable=AsyncMock,
         return_value=("123", "application/octet-stream"),
     )
-    async def test_hls_uses_standard_and_alternate_enclosures(self, url_head_info):
+    @patch("main.hlsFallbackMp3Size", return_value="187288")
+    async def test_hls_uses_standard_and_alternate_enclosures(
+        self, fallback_size, url_head_info
+    ):
         data = {
             "podcast": {
                 "title": "Test podcast",
@@ -243,6 +262,7 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             source.get("uri"), "https://cdn.example.com/main.m3u8?token=abc"
         )
+        fallback_size.assert_called_once_with()
         url_head_info.assert_awaited_once()
 
 

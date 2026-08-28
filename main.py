@@ -52,6 +52,7 @@ PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
 ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 HLS_FALLBACK_MP3 = "audio/dummy.mp3"
 AUDIO_DIR = Path(__file__).resolve().parent / "audio"
+HLS_FALLBACK_MP3_PATH = Path(__file__).resolve().parent / HLS_FALLBACK_MP3
 MAX_ARTWORK_SIZE = 10 * 1024 * 1024
 MAX_ARTWORK_DIMENSION = 3000
 MAX_ARTWORK_PIXELS = 20_000_000
@@ -555,7 +556,7 @@ async def addFeedEntry(fg, episode, session, locale):
         )
         fe.enclosure(
             f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/{HLS_FALLBACK_MP3}",
-            "187288",
+            hlsFallbackMp3Size(),
             "audio/mpeg",
         )
         fe.podcast_hls.alternate_enclosure(
@@ -573,6 +574,14 @@ async def addFeedEntry(fg, episode, session, locale):
 def chunks(x, n):
     for i in range(0, len(x), n):
         yield x[i : i + n]
+
+
+def hlsFallbackMp3Size():
+    if not HLS_FALLBACK_MP3_PATH.is_file():
+        raise FileNotFoundError(
+            f"HLS fallback MP3 not found: {HLS_FALLBACK_MP3_PATH}"
+        )
+    return str(HLS_FALLBACK_MP3_PATH.stat().st_size)
 
 
 async def podcastsToRss(podcast_id, data, locale):

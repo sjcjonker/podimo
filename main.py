@@ -93,6 +93,7 @@ class PodcastHlsExtension(BaseExtension):
     def __init__(self):
         self._itunes_explicit = None
         self._itunes_type = None
+        self._podcast_block = None
 
     def itunes_explicit(self, value=None):
         if value is not None:
@@ -103,6 +104,11 @@ class PodcastHlsExtension(BaseExtension):
         if value is not None:
             self._itunes_type = value
         return self._itunes_type
+
+    def podcast_block(self, value=None):
+        if value is not None:
+            self._podcast_block = value
+        return self._podcast_block
 
     def extend_ns(self):
         return {"podcast": PODCAST_NAMESPACE}
@@ -118,6 +124,11 @@ class PodcastHlsExtension(BaseExtension):
                 feed[0], etree.QName(ITUNES_NAMESPACE, "type")
             )
             podcast_type.text = self._itunes_type
+        if self._podcast_block is not None:
+            podcast_block = etree.SubElement(
+                feed[0], etree.QName(PODCAST_NAMESPACE, "block")
+            )
+            podcast_block.text = self._podcast_block
         return feed
 
 
@@ -306,7 +317,11 @@ async def not_found(error):
 
 @app.route("/audio/<string:filename>")
 async def serve_audio(filename):
-    return await send_from_directory(AUDIO_DIR, filename)
+    if filename != "dummy.mp3" and not re.fullmatch(
+        r"dummy-[0-9a-f]{64}\.mp3", filename
+    ):
+        return Response("Audio not found", 404, {})
+    return await send_from_directory(AUDIO_DIR, "dummy.mp3")
 
 
 @app.route("/feed/<string:podcast_id>.xml")
@@ -549,13 +564,14 @@ async def addFeedEntry(fg, episode, session, locale):
     is_hls = url.split("?", 1)[0].lower().endswith(".m3u8")
 
     if is_hls:
+        fallback_url = hlsFallbackMp3Url(episode_id)
         logging.debug(
-            f"Adding fallback MP3 enclosure {HLS_FALLBACK_MP3} and "
+            f"Adding fallback MP3 enclosure {fallback_url} and "
             f"HLS alternate enclosure "
             f"for episode {episode_id}"
         )
         fe.enclosure(
-            f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/{HLS_FALLBACK_MP3}",
+            fallback_url,
             hlsFallbackMp3Size(),
             "audio/mpeg",
         )
@@ -582,6 +598,20 @@ def hlsFallbackMp3Size():
             f"HLS fallback MP3 not found: {HLS_FALLBACK_MP3_PATH}"
         )
     return str(HLS_FALLBACK_MP3_PATH.stat().st_size)
+
+
+def hlsFallbackMp3Url(episode_id):
+    episode_hash = sha256(str(episode_id).encode("utf-8")).hexdigest()
+    return (
+        f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/audio/"
+        f"dummy-{episode_hash}.mp3"
+    )
+
+
+def normalizeLanguageTag(language):
+    if language and language.lower() == "nl-nl":
+        return "nl-NL"
+    return language
 
 
 async def podcastsToRss(podcast_id, data, locale):
@@ -648,7 +678,7 @@ async def podcastsToRss(podcast_id, data, locale):
         language = podcast["language"]
         if language is None:
             language = locale
-        fg.language(language)
+        fg.language(normalizeLanguageTag(language))
 
         artist = podcast["authorName"]
         if artist is None:
@@ -657,6 +687,7 @@ async def podcastsToRss(podcast_id, data, locale):
 
         if not PUBLIC_FEEDS:
             fg.podcast.itunes_block(True)
+            fg.podcast_hls.podcast_block("yes")
 
     async with ClientSession() as session:
         for chunk in chunks(episodes, 5):

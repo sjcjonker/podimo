@@ -115,8 +115,36 @@ class AudioRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.get_data(), b"mp3-data")
         send_file.assert_awaited_once_with(main.AUDIO_DIR, "dummy.mp3")
 
+    @patch("main.send_from_directory", new_callable=AsyncMock)
+    async def test_unique_audio_url_serves_shared_dummy_file(self, send_file):
+        send_file.return_value = main.Response(b"mp3-data", mimetype="audio/mpeg")
+        client = main.app.test_client()
+        filename = main.hlsFallbackMp3Url("episode-1").rsplit("/", 1)[-1]
+
+        response = await client.get(f"/audio/{filename}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(await response.get_data(), b"mp3-data")
+        send_file.assert_awaited_once_with(main.AUDIO_DIR, "dummy.mp3")
+
+    @patch("main.send_from_directory", new_callable=AsyncMock)
+    async def test_unknown_audio_filename_returns_404(self, send_file):
+        client = main.app.test_client()
+
+        response = await client.get("/audio/not-an-enclosure.mp3")
+
+        self.assertEqual(response.status_code, 404)
+        send_file.assert_not_awaited()
+
 
 class HlsFallbackTests(unittest.TestCase):
+    def test_url_is_stable_and_unique_per_episode(self):
+        first = main.hlsFallbackMp3Url("episode-1")
+
+        self.assertEqual(first, main.hlsFallbackMp3Url("episode-1"))
+        self.assertNotEqual(first, main.hlsFallbackMp3Url("episode-2"))
+        self.assertRegex(first, r"/audio/dummy-[0-9a-f]{64}\.mp3$")
+
     @patch("main.HLS_FALLBACK_MP3_PATH")
     def test_size_is_read_from_file(self, fallback_path):
         fallback_path.is_file.return_value = True
@@ -156,6 +184,7 @@ class PublicResolverTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
+    @patch("main.PUBLIC_FEEDS", False)
     @patch(
         "main.urlHeadInfo", new_callable=AsyncMock, return_value=("123", "audio/mpeg")
     )
@@ -205,6 +234,47 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<itunes:name>Example</itunes:name>", feed_text)
         self.assertIn("<itunes:email>you@example.com</itunes:email>", feed_text)
         self.assertIn("<itunes:type>episodic</itunes:type>", feed_text)
+        self.assertIn("<itunes:block>yes</itunes:block>", feed_text)
+        self.assertIn("<podcast:block>yes</podcast:block>", feed_text)
+        url_head_info.assert_awaited_once()
+
+    @patch("main.PUBLIC_FEEDS", True)
+    @patch(
+        "main.urlHeadInfo", new_callable=AsyncMock, return_value=("123", "audio/mpeg")
+    )
+    async def test_public_feed_omits_block_tags(self, url_head_info):
+        data = {
+            "podcast": {
+                "title": "Test podcast",
+                "description": "Description",
+                "images": {"coverImageUrl": "https://cdn.example.com/show.jpg"},
+                "language": "nl-nl",
+                "authorName": "Author",
+            },
+            "episodes": [
+                {
+                    "id": "episode-1",
+                    "title": "Episode one",
+                    "description": "Episode description",
+                    "publishDatetime": datetime(2026, 7, 22, tzinfo=timezone.utc),
+                    "imageUrl": "https://cdn.example.com/episode.jpg",
+                    "audio": {
+                        "url": "https://cdn.example.com/episode.mp3",
+                        "duration": 60,
+                    },
+                    "streamMedia": None,
+                    "podcastName": "Test podcast",
+                    "artist": "Author",
+                }
+            ],
+        }
+
+        feed = await main.podcastsToRss("podcast-id", data, "nl-NL")
+        feed_text = feed.decode("utf-8")
+
+        self.assertIn("<language>nl-NL</language>", feed_text)
+        self.assertNotIn("<itunes:block>", feed_text)
+        self.assertNotIn("<podcast:block>", feed_text)
         url_head_info.assert_awaited_once()
 
     @patch(
@@ -250,8 +320,7 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(enclosure)
         self.assertEqual(
             enclosure.get("url"),
-            f"{main.PODIMO_PROTOCOL}://{main.PODIMO_HOSTNAME}/"
-            f"{main.HLS_FALLBACK_MP3}",
+            main.hlsFallbackMp3Url("episode-hls"),
         )
         self.assertEqual(enclosure.get("length"), "187288")
         self.assertEqual(enclosure.get("type"), "audio/mpeg")

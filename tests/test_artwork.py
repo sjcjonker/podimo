@@ -231,9 +231,10 @@ class FeedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(enclosure)
         self.assertEqual(
             enclosure.get("url"),
-            main.HLS_FALLBACK_MP3_URL,
+            f"{main.PODIMO_PROTOCOL}://{main.PODIMO_HOSTNAME}/"
+            f"{main.HLS_FALLBACK_MP3}",
         )
-        self.assertEqual(enclosure.get("length"), "0")
+        self.assertEqual(enclosure.get("length"), "187288")
         self.assertEqual(enclosure.get("type"), "audio/mpeg")
         alternate = item.find(f"{{{main.PODCAST_NAMESPACE}}}alternateEnclosure")
         self.assertIsNotNone(alternate)

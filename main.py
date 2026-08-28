@@ -50,7 +50,7 @@ from podimo.utils import generateHeaders, randomHexId
 
 PODCAST_NAMESPACE = "https://podcastindex.org/namespace/1.0"
 ITUNES_NAMESPACE = "http://www.itunes.com/dtds/podcast-1.0.dtd"
-HLS_FALLBACK_MP3_URL = "https://sjc.nl/pc/audio/dummy.mp3"
+HLS_FALLBACK_MP3 = "audio/dummy.mp3"
 AUDIO_DIR = Path(__file__).resolve().parent / "audio"
 MAX_ARTWORK_SIZE = 10 * 1024 * 1024
 MAX_ARTWORK_DIMENSION = 3000
@@ -549,11 +549,15 @@ async def addFeedEntry(fg, episode, session, locale):
 
     if is_hls:
         logging.debug(
-            f"Adding fallback MP3 enclosure {HLS_FALLBACK_MP3_URL} and "
+            f"Adding fallback MP3 enclosure {HLS_FALLBACK_MP3} and "
             f"HLS alternate enclosure "
             f"for episode {episode_id}"
         )
-        fe.enclosure(HLS_FALLBACK_MP3_URL, 0, "audio/mpeg")
+        fe.enclosure(
+            f"{PODIMO_PROTOCOL}://{PODIMO_HOSTNAME}/{HLS_FALLBACK_MP3}",
+            "187288",
+            "audio/mpeg",
+        )
         fe.podcast_hls.alternate_enclosure(
             uri=url,
             type="application/x-mpegURL",
